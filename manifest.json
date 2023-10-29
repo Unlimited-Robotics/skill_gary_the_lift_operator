@@ -1,0 +1,19 @@
+{
+    "name": "gary_the_lift_operator",
+    "description": "Approach a lift console and press the chosen button",
+    "type": "Skill",
+    "version" : "1.0.0",
+    "dependencies" : {
+        "pip": [],
+        "skills": ["approach_to_something", "0.6.1.dev0"]
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/unlimitedrobotics-skills/gary_the_lift_operator"
+    },
+    "license": "MIT",
+    "author": {
+        "name": "Kai Geronik",
+        "email": "kai@unlimited-robotics.com"
+    }
+}
