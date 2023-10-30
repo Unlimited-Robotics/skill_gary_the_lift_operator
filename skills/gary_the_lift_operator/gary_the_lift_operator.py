@@ -49,6 +49,8 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
     STATES = [
         'APPROACHING_ELEVATOR',
+        'MOVING_SIDEWAYS',
+        'DETECTING_BUTTONS',
         'POSITION_ARM',
         'PRESS_BUTTON',
         'RETURN_ARM',
@@ -116,6 +118,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         # General variables
         self.button = str(self.setup_args['button_to_press']) 
         self.approach_successful = False  # Approach success flag
+        self.buttons_detected = False     # Buttons detected flag
         self.button_x = None              # x of the button (from baselink)
         self.button_y = None              # y of the button (from baselink)
         self.button_z = None              # z of the button (from baselink)
@@ -236,53 +239,36 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
     async def return_arm_home(self):
-        await self.arms.set_predefined_pose(arm = self.arm_name,
-                                            predefined_pose = 'home',
-                                            wait = True)
+        await self.arms.set_predefined_pose(
+                                arm = self.arm_name,
+                                predefined_pose = 'home',
+                                callback_feedback = self.arms_callback_feedback,
+                                wait = True)
 
+
+    async def turn_and_burn(self):
+        await self.motion.rotate(angle = 90, angular_speed = 15, wait = True)
+        await self.motion.move_linear(distance = 0.3, x_velocity = 0.05, wait = True)
+        await self.motion.rotate(angle = -90, angular_speed = 15, wait = True)
 
     ###----------------------------- CALLBACKS -----------------------------###
 
-    # Create a skill (approach) feedback
+    # ApproachToSOmething skill feedback callback
     async def skill_callback_feedback(self, feedback):
         self.log.info(f'approach feedback: {feedback}')
         if 'final_linear' in feedback:
             self.approach_final_linear = feedback['final_linear']
 
 
-    # Create a skill (approach) finish feedback
+    # ApproachToSomething skill finish callback
     async def skill_callback_done(self, done_feedback, done_info):
         self.approach_done_feedback = done_feedback
         self.log.info(f'approach done feedback: {done_feedback}')
         self.log.info(f'approach done info: {done_info}')
-        self.detections_dict = done_info['final_detections_dict']
-
-        # Set the final button detections
-        if self.button in self.detections_dict:
-            
-            print('--------------------')
-            print(self.detections_dict[self.button])
-
-            # self.button_x = (self.detections_dict[self.button]['x_min'] + \
-            #                 (self.detections_dict[self.button]['x_max'] -  
-            #                 self.detections_dict[self.button]['x_min'])/2)
-            
-            # self.button_y = (self.detections_dict[self.button]['y_max'] - \
-            #                 self.detections_dict[self.button]['y_min'])/2
-            
-            # self.button_z = self.detections_dict[self.button]['distance']
-
-            self.button_x = self.detections_dict['center_point'][0]
-            self.button_y = self.detections_dict['center_point'][1]
-            self.button_z = self.detections_dict['center_point'][2]
-
-            print(f'x y z : {self.button_x}, {self.button_y}, {self.button_z}')
-
-        else:
-            self.abort(*ERROR_BUTTON_NOT_FOUND)
+        
 
     def arms_callback_feedback(self, code, error_feedback, arm, percentage):
-        self.log.info(f'ARM:{arm} PERCENTAGE:{percentage:.2f}')
+        self.log.info(f'ARM: {arm} TRAJECTORY: {percentage:.2f}% DONE')
 
 
     def arms_callback_finish(self, error, error_msg, fraction):
@@ -295,23 +281,31 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                 f'ERROR IN THE EXECUTION NUMBER: {error}:{error_msg}')
 
 
-    def callback_all_buttons(self, detections, image):
-        if detections:
-            self.detections_dict['object_name'] = detections['object_name'] 
-            self.detections_dict['object_name']['x_max'] = detections['x_max']
-            self.detections_dict['object_name']['x_min'] = detections['x_min']
-            self.detections_dict['object_name']['y_max'] = detections['y_max']
-            self.detections_dict['object_name']['y_min'] = detections['y_min']
-            self.detections_dict['object_name']['distance'] = detections['distance']
+    def callback_predictions(self, predictions, timestamp):
+        '''Callback used to obtain predictions'''
+        if predictions:
+            for pred in predictions:
+                object_name = predictions[pred]['object_name']
+                self.detections_dict[object_name] = predictions[pred]
 
-            print(self.detections_dict)
+            if self.button in self.detections_dict:
+                self.button_x = self.detections_dict[self.button]['center_point'][0]
+                self.button_y = self.detections_dict[self.button]['center_point'][1]
+                self.button_z = self.detections_dict[self.button]['center_point'][2]
+
+                self.buttons_detected = True
+                self.log.debug(f'button location (from baselink) : \
+                {self.button_x}, {self.button_y}, {self.button_z}')
+        
+        else:
+            self.abort(*ERROR_BUTTON_NOT_FOUND)
 
     ###------------------------------ ACTIONS ------------------------------###
 
     async def enter_APPROACHING_ELEVATOR(self):
         '''Action used to execute the approach skill'''
         self.reset_approach_feedbacks()
-        self.log.info('Executing approach skill...')
+        self.log.info('Executing ApproachToSomething skill...')
         await self.skill_approach.execute_setup(
             setup_args = {
                 'working_camera' : self.setup_args['working_camera'],
@@ -338,17 +332,38 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         await self.skill_approach.wait_main()
         await self.skill_approach.execute_finish()
         await self.check_approach_success(
-            thresh = self.execute_args['distance_to_goal'] + 0.1,
-            max_attempts = 3
+                thresh = self.execute_args['distance_to_goal'] + 0.1,
+                max_attempts = 3
             )
+
+    async def enter_MOVING_SIDEWAYS(self):
+        await self.sleep(3.0)
+        await self.turn_and_burn()
+
+
+    async def enter_DETECTING_BUTTONS(self):
+        # Enable detection model
+        self.log.info('Enabling elevators_yolov5 model...')
+        self.predictor_handler = await self.cv.enable_model(
+                name = 'elevators_yolov5', 
+                source = self.setup_args['working_camera'],
+                model_params = {'depth':True}
+            )
+        
+        # Set handler
+        self.predictor_handler.set_detections_callback(
+                callback=self.callback_predictions,
+                as_dict=True,
+                call_without_detections=True
+            )
+        
 
 
     async def enter_POSITION_ARM(self):
         '''Action used to position the arm before pressing the button'''
-
-        pose = {'x' : 0.48661,
-                'y' : -0.20621,
-                'z' : 1.18,
+        pose = {'x' : min(self.button_x, 0.5),
+                'y' : self.button_y,
+                'z' : self.button_z,
                 'roll' : 0,
                 'pitch' : 0,
                 'yaw' : 0}
@@ -371,11 +386,21 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     
     async def transition_from_APPROACHING_ELEVATOR(self):
         if self.approach_successful:
-            self.set_state('POSITION_ARM')
+            self.set_state('MOVING_SIDEWAYS')
         else:
             self.set_state('APPROACHING_ELEVATOR')
 
     
+    async def transition_from_MOVING_SIDEWAYS(self):
+        if not self.motion.is_moving(): 
+            self.set_state('DETECTING_BUTTONS')
+
+
+    async def transition_from_DETECTING_BUTTONS(self):
+        if self.buttons_detected:
+            self.set_state('POSITION_ARM')
+
+
     async def transition_from_POSITION_ARM(self):
         self.set_state('END')
 
