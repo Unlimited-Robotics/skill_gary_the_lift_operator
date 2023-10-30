@@ -11,7 +11,8 @@ class RayaApplication(RayaApplicationBase):
         await self.lift_operator.execute_setup(
             setup_args = {
                 'working_camera' : self.camera,
-                'map_name' : self.map_name
+                'map_name' : self.map_name,
+                'button_to_press' : self.button_to_press
             }
         )
 
@@ -38,19 +39,24 @@ class RayaApplication(RayaApplicationBase):
 
     def get_arguments(self):
         self.camera = self.get_argument('-c', '--camera', 
-                type=str, 
-                required=True,
-                help='name of camera to use'
+                type = str, 
+                required = True,
+                help = 'name of camera to use'
             )   
         
         self.angle_to_goal = self.get_argument('-a', '--angle', 
-                type=float, 
-                required=True,
-                help='Angle to approach'
+                type = float, 
+                required = True,
+                help = 'Angle to approach'
             )  
         
         self.map_name = self.get_argument('-m', '--map_name',
-                type=str,
-                required=True,
-                help='map name to use'
+                type = str,
+                required = True,
+                help = 'map name to use'
             )   
+        
+        self.button_to_press = self.get_argument('-b', '--button_to_press',
+                type = str,
+                required = True,
+                help = 'button to press')
