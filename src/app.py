@@ -26,8 +26,6 @@ class RayaApplication(RayaApplicationBase):
         )
         self.log.debug(execute_results)
 
-        await self.finish()
-
 
     async def finish(self):
         await self.lift_operator.execute_finish()
