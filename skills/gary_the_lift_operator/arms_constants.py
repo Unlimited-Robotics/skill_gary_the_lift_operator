@@ -24,10 +24,14 @@ JOINT_NAMES = [
                 "arm_right_wrist_joint"
             ]
 
-RIGHT_ARM_OFFSET_GARY13 = {'x' : -0.04,
-                           'y' : -0.02,
-                           'z' : 0.007}
+# Gary 13 right arm
+RIGHT_ARM_OFFSET = {'x' : -0.04,
+                    'y' : 0.0,
+                    'z' : -0.01}
 
-ARM_ERROR_THRESHOLD = {'x' : 0.01,
-                       'y' : 0.01,
-                       'z' : 0.01}
+GRIPPER_JIG_OFFSET = {'x' : 0.0,
+                      'y' : 0.01,
+                      'z' : 0.0}
+
+ARM_ERROR_THRESHOLD = [0.03, 0.03, 0.03]
+

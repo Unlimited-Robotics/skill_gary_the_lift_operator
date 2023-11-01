@@ -42,7 +42,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     ]
 
     DEFAULT_EXECUTE_ARGS = {
-        'distance_to_goal' : 0.7
+        'distance_to_goal' : 0.75
     }
 
 
@@ -73,6 +73,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     debug = False
     if debug is True:
         INITIAL_STATE = 'RETURN_ARM'
+        #INITIAL_STATE = 'DETECTING_BUTTONS'
 
     ###--------------------------- SKILL METHODS ---------------------------###
 
@@ -130,6 +131,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         self.detection_start_time = None  # Timer for detections
         self.going_backwards_time = None  # Timer for going backwards
         self.position_attempts = 0        # Num of attempts to position the arm
+        self.trex_pose_xyz = None         # Trex pose location
         self.detections_dict = {}         # Dictionary to store detections
 
         # Arms variables
@@ -219,7 +221,11 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
 
-    async def forward_kinematics(self, pose, units = ANGLE_UNIT.DEGREES):
+    async def forward_kinematics(self,
+                                 pose,
+                                 cartesian_path = True,
+                                 planner = 'RRTconnect',
+                                 units = ANGLE_UNIT.DEGREES):
         '''
             INPUTS:
                 pose: dict with keys of x, y, z, roll, pitch, yaw, and float
@@ -238,11 +244,11 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             pitch = pose["pitch"],
             yaw = pose["yaw"],
             units = units,
-            cartesian_path = True,
+            cartesian_path = cartesian_path,
             callback_feedback = self.arms_callback_feedback,
             callback_finish = self.arms_callback_finish,
             wait = True,
-            additional_options = {'planner' : 'RRTstar'}
+            additional_options = {'planner' : planner}
         )
 
 
@@ -266,7 +272,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
 
-    async def trex_position(self):
+    async def static_trex_position(self):
         '''Position arm in trex position'''
         angles = [0.0, 0.0, 0.0, 0.0, 2.1, 0.0, -0.5, 1.57]
         await self.arms.set_joints_position(
@@ -281,18 +287,33 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             acceleration_scaling =  0.8,
             wait=True)
 
+        # self.log.debug(await self.arms.get_predefined_poses_list(arm = self.arm_name))
+        # await self.arms.set_predefined_pose(arm = self.arm_name,
+        #                                     predefined_pose = 'pre_pick',
+        #                                     wait = True)
 
 
-    async def test_trex_position(self):
+        self.trex_pose = await self.arms.get_current_pose(self.arm_name)
+        self.trex_pose_xyz = self.trex_pose['position']
+
+    async def dynamic_trex_position(self):
         '''Position arm in trex position'''
-        self.trex_pose = {'x' : 0.1,
-                'y' : self.button_y + RIGHT_ARM_OFFSET_GARY13['y'],
-                'z' : self.button_z + RIGHT_ARM_OFFSET_GARY13['z'],
-                'roll' : 0,
-                'pitch' : 0,
-                'yaw' : 0}
+        self.trex_pose = {
+            'x' : self.button_x + RIGHT_ARM_OFFSET['x'] + GRIPPER_JIG_OFFSET['x'] - 0.2,
+            'y' : self.button_y + RIGHT_ARM_OFFSET['y'] + GRIPPER_JIG_OFFSET['y'],
+            'z' : self.button_z + RIGHT_ARM_OFFSET['z'] + GRIPPER_JIG_OFFSET['z'],
+            'roll' : 0,
+            'pitch' : 0,
+            'yaw' : 0
+        }
+        
+        self.trex_pose_xyz = [self.trex_pose['x'],
+                              self.trex_pose['y'],
+                              self.trex_pose['z']]
 
-        await self.forward_kinematics(self.trex_pose)
+        await self.forward_kinematics(self.trex_pose,
+                                      cartesian_path = False,
+                                      planner = 'RRTstar')
 
 
 
@@ -385,15 +406,12 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
     async def enter_MOVING_SIDEWAYS(self):
-        await self.sleep(2.0)
+        await self.sleep(1.5)
         await self.turn_and_burn()
 
 
 
     async def enter_DETECTING_BUTTONS(self):
-
-         # Start timer
-        self.detection_start_time = time.time()
 
         # Enable model
         self.log.info('Enabling elevators_yolov5 model...')
@@ -409,37 +427,52 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                 as_dict=True,
                 call_without_detections=True
             )
-    
+
+        # Start timer
+        self.detection_start_time = time.time()
 
 
     async def enter_POSITION_ARM(self):
         '''Action used to position the arm before pressing the button'''
-        #await self.trex_position()
-        try:   
-            await self.test_trex_position()
-            await self.gripper_command('close')
 
+        # Try to position the arm dynamically (according to buttons location)
+        try:
+            await self.static_trex_position()
+            await self.dynamic_trex_position()
+
+        # Try to position the arm statically (according to const joints values)
         except Exception as e:
-            await self.return_arm_home()
-            self.abort(*ERROR_COULDNT_POSITION_ARM)
+            self.log.debug("Couldn't perform dynamic trex positioning. \
+                           Performing static trex positioning...")
+            try:
+                await self.static_trex_position()
+
+            except Exception as e:
+                await self.return_arm_home()
+                self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
+                self.abort(*ERROR_COULDNT_POSITION_ARM)
         
+        await self.gripper_command('close')
+
 
 
     async def enter_PRESS_BUTTON(self):
         '''Action used to press the chosen button'''
-        pose = {'x' : self.button_x + RIGHT_ARM_OFFSET_GARY13['x'],
-                'y' : self.button_y + RIGHT_ARM_OFFSET_GARY13['y'],
-                'z' : self.button_z + RIGHT_ARM_OFFSET_GARY13['z'],
-                'roll' : 0,
-                'pitch' : 0,
-                'yaw' : 0}
+        pose = {
+            'x' : self.button_x + RIGHT_ARM_OFFSET['x'] + GRIPPER_JIG_OFFSET['x'],
+            'y' : self.button_y + RIGHT_ARM_OFFSET['y'] + GRIPPER_JIG_OFFSET['y'],
+            'z' : self.button_z + RIGHT_ARM_OFFSET['z'] + GRIPPER_JIG_OFFSET['z'],
+            'roll' : 0,
+            'pitch' : 0,
+            'yaw' : 0
+        }
 
         try:
             await self.forward_kinematics(pose)
 
         except Exception as e:
             await self.return_arm_home()
-            self.log.warn(f'ERROR IN PRESS_BUTTON - {e}')
+            self.log.warn(f'ERROR IN enter_PRESS_BUTTON - {e}')
             self.abort(*ERROR_PRESSING_BUTTON)
         
         #TODO: add a feedback mechanism
@@ -472,8 +505,6 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
     async def transition_from_DETECTING_BUTTONS(self):
         if self.buttons_detected:
-            self.log.info('Disabling model elevators_yolov5...')
-            await self.cv.disable_model(model_obj = self.predictor_handler)
             self.set_state('POSITION_ARM')
         
         elif (time.time() - self.detection_start_time) > NO_TARGET_TIMEOUT:
@@ -482,9 +513,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
     async def transition_from_POSITION_ARM(self):
-        current_pose = self.arms.get_current_pose()
-        self.log.debug(current_pose)
-        if current_pose - self.trex_pose <= ARM_ERROR_THRESHOLD:
+        current_pose = await self.arms.get_current_pose(self.arm_name)
+        current_pose_xyz = np.array(current_pose['position'])
+        if all(abs(current_pose_xyz - self.trex_pose_xyz) <= ARM_ERROR_THRESHOLD):
             self.set_state('PRESS_BUTTON')
 
         else:
@@ -507,7 +538,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
             except Exception as e:
                 if (time.time() - self.going_backwards_time) > MOTION_TIMEOUT:
-                    self.log.debug(f'Got error - {e}')
+                    self.log.warn(f'ERROR IN transition_from_PRESS_BUTTON - {e}')
                     self.abort(*ERROR_GOING_BACKWARDS)
 
 
