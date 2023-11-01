@@ -64,7 +64,11 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         'END'
     ]
     
-    STATES_TIMEOUTS = {}
+    STATES_TIMEOUTS = {'DETECTING_BUTTONS' :
+                       (NO_TARGET_TIMEOUT, ERROR_BUTTON_NOT_FOUND),
+
+                       'PRESSING_BUTTON' : 
+                       (MOTION_TIMEOUT, ERROR_GOING_BACKWARDS)}
 
     debug = False
     if debug is True:
@@ -123,8 +127,10 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         self.button_x = None              # x of the button (from baselink)
         self.button_y = None              # y of the button (from baselink)
         self.button_z = None              # z of the button (from baselink)
-        self.movement_counter = 0         # Counter of backwards movement attempts
-        self.detections_dict = {}
+        self.detection_start_time = None  # Timer for detections
+        self.going_backwards_time = None  # Timer for going backwards
+        self.position_attempts = 0        # Num of attempts to position the arm
+        self.detections_dict = {}         # Dictionary to store detections
 
         # Arms variables
         self.arm_name = self.setup_args['arm_name']
@@ -136,6 +142,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         '''Reset the feedbacks from the approach skill'''
         self.approach_successful = False
     
+
 
     async def check_approach_success(self, thresh, max_attempts):
         '''
@@ -206,7 +213,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         goal.hand = arm  # side = "right_arm"/"left_arm"
         print(f'calibrating {arm}')
         self.__cli__calibrate_gripper.wait_for_server()
-        result = await self.__cli__calibrate_gripper.send_goal_async(goal)  ## await
+        result = await self.__cli__calibrate_gripper.send_goal_async(goal)
         print(f'result:{result}')
         print(f'done calibrating {arm}')
 
@@ -252,13 +259,15 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
     async def turn_and_burn(self):
+        '''Turn 90 degrees, move forwards, turn back'''
         await self.motion.rotate(angle = 90, angular_speed = 15, wait = True)
-        await self.motion.move_linear(distance = 0.2, x_velocity = 0.05, wait = True)
+        await self.motion.move_linear(distance = 0.225, x_velocity = 0.05, wait = True)
         await self.motion.rotate(angle = -90, angular_speed = 15, wait = True)
 
 
 
     async def trex_position(self):
+        '''Position arm in trex position'''
         angles = [0.0, 0.0, 0.0, 0.0, 2.1, 0.0, -0.5, 1.57]
         await self.arms.set_joints_position(
             arm=self.arm_name,
@@ -272,18 +281,33 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             acceleration_scaling =  0.8,
             wait=True)
 
+
+
+    async def test_trex_position(self):
+        '''Position arm in trex position'''
+        self.trex_pose = {'x' : 0.1,
+                'y' : self.button_y + RIGHT_ARM_OFFSET_GARY13['y'],
+                'z' : self.button_z + RIGHT_ARM_OFFSET_GARY13['z'],
+                'roll' : 0,
+                'pitch' : 0,
+                'yaw' : 0}
+
+        await self.forward_kinematics(self.trex_pose)
+
+
+
     ###----------------------------- CALLBACKS -----------------------------###
 
-    # ApproachToSOmething skill feedback callback
     async def skill_callback_feedback(self, feedback):
+        '''ApproachToSomething skill feedback callback'''
         self.log.info(f'approach feedback: {feedback}')
         if 'final_linear' in feedback:
             self.approach_final_linear = feedback['final_linear']
 
 
 
-    # ApproachToSomething skill finish callback
     async def skill_callback_done(self, done_feedback, done_info):
+        '''ApproachToSomething skill finish callback'''
         self.approach_done_feedback = done_feedback
         self.log.info(f'approach done feedback: {done_feedback}')
         self.log.info(f'approach done info: {done_info}')
@@ -319,9 +343,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                 self.button_z = self.detections_dict[self.button]['center_point'][2]
 
                 self.buttons_detected = True
-                # self.log.debug(f'button location (from baselink) : \
-                # {self.button_x}, {self.button_y}, {self.button_z}')
-        
+                
 
 
     ###------------------------------ ACTIONS ------------------------------###
@@ -369,6 +391,11 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
     async def enter_DETECTING_BUTTONS(self):
+
+         # Start timer
+        self.detection_start_time = time.time()
+
+        # Enable model
         self.log.info('Enabling elevators_yolov5 model...')
         self.predictor_handler = await self.cv.enable_model(
                 name = 'elevators_yolov5', 
@@ -382,13 +409,19 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                 as_dict=True,
                 call_without_detections=True
             )
-        
+    
 
 
     async def enter_POSITION_ARM(self):
         '''Action used to position the arm before pressing the button'''
-        await self.trex_position()
-        await self.gripper_command('close')
+        #await self.trex_position()
+        try:   
+            await self.test_trex_position()
+            await self.gripper_command('close')
+
+        except Exception as e:
+            await self.return_arm_home()
+            self.abort(*ERROR_COULDNT_POSITION_ARM)
         
 
 
@@ -413,7 +446,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         feedback_mechanism = True
         if feedback_mechanism:
             self.button_pressed = True
-
+            self.going_backwards_time = time.time()
 
 
     async def enter_RETURN_ARM(self):
@@ -438,39 +471,44 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
     async def transition_from_DETECTING_BUTTONS(self):
-        await self.sleep(3.0)
         if self.buttons_detected:
             self.log.info('Disabling model elevators_yolov5...')
             await self.cv.disable_model(model_obj = self.predictor_handler)
             self.set_state('POSITION_ARM')
-        else:
+        
+        elif (time.time() - self.detection_start_time) > NO_TARGET_TIMEOUT:
             self.abort(*ERROR_BUTTON_NOT_FOUND)
 
 
 
     async def transition_from_POSITION_ARM(self):
-        self.set_state('PRESS_BUTTON')
+        current_pose = self.arms.get_current_pose()
+        self.log.debug(current_pose)
+        if current_pose - self.trex_pose <= ARM_ERROR_THRESHOLD:
+            self.set_state('PRESS_BUTTON')
+
+        else:
+            self.position_attempts += 1
+            if self.position_attempts == MAX_POSITION_ATTEMPTS:
+                self.abort(*ERROR_ARM_POSITION_NOT_ACCURATE)
+            self.set_state('POSITION_ARM')
 
 
 
     async def transition_from_PRESS_BUTTON(self):
-        if self.button_pressed:
-            if not self.motion.is_moving():
+        if self.button_pressed and not self.motion.is_moving():
+            try:
+                await self.motion.move_linear(distance = 0.1,
+                                                x_velocity = -0.05,
+                                                enable_obstacles = True,
+                                                wait = True)
+            
+                self.set_state('RETURN_ARM')
 
-                if self.movement_counter == 3:
-                    self.abort(*ERROR_UNPRESSING_BUTTON)
-
-                try:
-                    await self.motion.move_linear(distance = 0.2,
-                                                    x_velocity = -0.05,
-                                                    wait = True)
-                    
-                except Exception as e:
-                    self.log.warn(f'ERROR IN PRESS_BUTTON - {e}, trying again...')
-                    await self.sleep(1.5)
-                    self.movement_counter += 1
-
-            self.set_state('RETURN_ARM')
+            except Exception as e:
+                if (time.time() - self.going_backwards_time) > MOTION_TIMEOUT:
+                    self.log.debug(f'Got error - {e}')
+                    self.abort(*ERROR_GOING_BACKWARDS)
 
 
 
