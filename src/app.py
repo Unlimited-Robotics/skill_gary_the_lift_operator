@@ -1,4 +1,5 @@
 from raya.application_base import RayaApplicationBase
+from raya.controllers import NavigationController
 from raya.skills import RayaSkillHandler
 
 from skills.gary_the_lift_operator import SkillGaryTheLiftOperator
@@ -58,3 +59,4 @@ class RayaApplication(RayaApplicationBase):
                 type = str,
                 required = True,
                 help = 'button to press')
+    

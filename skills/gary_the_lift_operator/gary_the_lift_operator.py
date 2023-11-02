@@ -19,6 +19,8 @@ from skills.gary_the_lift_operator.arms_constants import *
 import asyncio
 import argparse
 import time
+import cv2
+import pytesseract
 import numpy as np
 
 class SkillGaryTheLiftOperator(RayaFSMSkill):
@@ -133,6 +135,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         self.position_attempts = 0        # Num of attempts to position the arm
         self.trex_position = None         # Trex pose location
         self.detections_dict = {}         # Dictionary to store detections
+        self.image = None                 # Current image from the camera
 
         # Arms variables
         self.arm_name = self.setup_args['arm_name']
@@ -247,6 +250,8 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             cartesian_path = cartesian_path,
             callback_feedback = self.arms_callback_feedback,
             callback_finish = self.arms_callback_finish,
+            velocity_scaling = 0.1,
+            acceleration_scaling = 0.1,
             wait = True,
             additional_options = {'planner' : planner}
         )
@@ -267,24 +272,23 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     async def turn_and_burn(self):
         '''Turn 90 degrees, move forwards, turn back'''
         await self.motion.rotate(angle = 90, angular_speed = 15, wait = True)
-        await self.motion.move_linear(distance = 0.225, x_velocity = 0.05, wait = True)
+        await self.motion.move_linear(distance = 0.28, x_velocity = 0.05, wait = True)
         await self.motion.rotate(angle = -90, angular_speed = 15, wait = True)
 
 
 
     async def static_trex_position(self):
         '''Position arm in trex position'''
-        angles = [0.0, 0.0, 0.0, 0.0, 2.1, 0.0, -0.5, 1.57]
         await self.arms.set_joints_position(
             arm=self.arm_name,
             name_joints=self.joint_names,
-            angle_joints = angles,
+            angle_joints = TREX_POSITION_ANGLES,
             units = ANGLE_UNIT.RADIANS,
             use_obstacles = True,
             save_trajectory = True,
             name_trajectory = 'trex_position',
-            velocity_scaling = 0.5,
-            acceleration_scaling =  0.8,
+            velocity_scaling = 0.4,
+            acceleration_scaling =  0.4,
             wait=True)
 
 
@@ -309,10 +313,39 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                               self.trex_pose['z']]
 
         await self.forward_kinematics(self.trex_pose,
-                                      cartesian_path = False,
-                                      planner = 'RRTstar')
+                                      cartesian_path = True,
+                                      planner = 'RRTconnect')
 
 
+
+    def led_confirmation(self):
+        '''Confirm that the desired button shows up on the led screen'''
+
+        # Extract the led bounding box
+        if 'led' in self.detections_dict:
+            x_min = self.detections_dict['led']['x_min']
+            x_max = self.detections_dict['led']['x_max']
+            y_min = self.detections_dict['led']['y_min']
+            y_max = self.detections_dict['led']['y_max']
+            led_bbox = self.image[x_min : x_max, y_min : y_max]
+
+            # Binarize image
+            led_bbox_gray = cv2.cvtColor(led_bbox, cv2.COLOR_RGB2GRAY)
+            _, led_bbox_binary = cv2.threshold(led_bbox_gray, 128, 255,
+                                                cv2.THRESH_BINARY)
+
+            # Clean salt and pepper noise using median filter
+            led_bbox_no_SP = cv2.medianBlur(led_bbox_binary, 5)
+
+            # Detect the number in the led
+            num_in_led = pytesseract.image_to_string(image = led_bbox_no_SP,
+                                                     config = '--psm 10')
+            
+            # Compare the chosen button with the number in the led
+            if num_in_led == self.button:
+                return True
+        
+        return False
 
     ###----------------------------- CALLBACKS -----------------------------###
 
@@ -348,8 +381,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
 
-    def callback_predictions(self, predictions, timestamp):
+    def callback_predictions(self, predictions, image):
         '''Callback used to obtain predictions'''
+        self.image = image
         if predictions:
             for pred in predictions:
                 object_name = predictions[pred]['object_name']
@@ -366,6 +400,13 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     ###------------------------------ ACTIONS ------------------------------###
 
     async def enter_APPROACHING_ELEVATOR(self):
+
+        #TODO: REMOVE NAVIGATING AFTER TESTING
+        await self.navigation.navigate_to_position(x = 124.0,
+                                                   y = 305.0,
+                                                   angle = -50.0,
+                                                   wait = True)
+
         '''Action used to execute the approach skill'''
         self.reset_approach_feedbacks()
         self.log.info('Executing ApproachToSomething skill...')
@@ -381,9 +422,10 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             execute_args = {
                 'angle_to_goal' : self.execute_args['angle_to_goal'],
                 'distance_to_goal': self.execute_args['distance_to_goal'],
-                'linear_velocity': 0.07,
-                'max_x_error_allowed': 0.07,
-                'max_y_error_allowed': 0.03,
+                'linear_velocity': 0.06,
+                'max_x_error_allowed': 0.03,
+                'max_y_error_allowed': 0.02,
+                'max_angle_error_allowed' : 3.0,
                 'min_correction_distance': 0.1,
                 'predictions_to_average' : 2
             },
@@ -430,36 +472,34 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
     async def enter_POSITION_ARM(self):
         '''Action used to position the arm before pressing the button'''
-        
-        try:
-            await self.static_trex_position()
-            await self.gripper_command('close')
-
-        except Exception as e:
-            await self.return_arm_home()
-            if self.position_attempts > MAX_POSITION_ATTEMPTS:
-                self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
-                self.abort(*ERROR_COULDNT_POSITION_ARM)
-
-        # Try to position the arm dynamically (according to buttons location)
         # try:
+        #     await self.gripper_command('close')
         #     await self.static_trex_position()
-        #     await self.dynamic_trex_position()
 
-        # # Try to position the arm statically (according to const joints values)
         # except Exception as e:
-        #     self.log.debug("Couldn't perform dynamic trex positioning. \
-        #                    Performing static trex positioning...")
-        #     try:
-        #         await self.static_trex_position()
-
-        #     except Exception as e:
-        #         await self.return_arm_home()
+        #     await self.return_arm_home()
+        #     if self.position_attempts > MAX_POSITION_ATTEMPTS:
         #         self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
         #         self.abort(*ERROR_COULDNT_POSITION_ARM)
-        
-        # await self.gripper_command('close')
 
+        # Try to position the arm dynamically (according to buttons location)
+        try:
+            await self.gripper_command('close')
+            await self.static_trex_position()
+            await self.dynamic_trex_position()
+
+        # Try to position the arm statically (according to const joints values)
+        except Exception as e:
+            self.log.debug("Couldn't perform dynamic trex positioning. \
+                           Performing static trex positioning...")
+            try:
+                await self.static_trex_position()
+
+            except Exception as e:
+                await self.return_arm_home()
+                self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
+                self.abort(*ERROR_COULDNT_POSITION_ARM)
+    
 
 
     async def enter_PRESS_BUTTON(self):
@@ -474,16 +514,18 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         }
 
         try:
+            await self.sleep(2.0)
             await self.forward_kinematics(pose)
+            await self.sleep(2.0)
 
         except Exception as e:
             await self.return_arm_home()
             self.log.warn(f'ERROR IN enter_PRESS_BUTTON - {e}')
             self.abort(*ERROR_PRESSING_BUTTON)
         
-        #TODO: add a feedback mechanism
-        feedback_mechanism = True
-        if feedback_mechanism:
+        #TODO: check the led_confirmation feedback mechanism u created
+        led_confirmation = True
+        if led_confirmation:
             self.button_pressed = True
             self.going_backwards_time = time.time()
 
@@ -510,6 +552,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
     async def transition_from_DETECTING_BUTTONS(self):
+        await self.sleep(1.5)
         if self.buttons_detected:
             self.set_state('POSITION_ARM')
         
@@ -518,10 +561,10 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
         else:
             try:
-                await self.motion.move_linear(distance = 0.05,
+                await self.motion.move_linear(distance = 0.075,
                                                 x_velocity = -0.05,
                                                 enable_obstacles = True,
-                                                wait = True)
+                                                wait = False)
             
             except Exception as e:
                 self.log.warn(f'ERROR IN transition_from_DETECTING_BUTTONS - {e}')
@@ -543,11 +586,12 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
     async def transition_from_PRESS_BUTTON(self):
+        await self.sleep(1.0)
         if self.button_pressed and not self.motion.is_moving():
             try:
                 await self.motion.move_linear(distance = 0.1,
                                                 x_velocity = -0.05,
-                                                enable_obstacles = True,
+                                                enable_obstacles = False,
                                                 wait = True)
             
                 self.set_state('RETURN_ARM')
