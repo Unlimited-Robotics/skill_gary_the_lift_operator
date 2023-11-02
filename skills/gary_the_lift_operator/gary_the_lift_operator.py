@@ -131,7 +131,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         self.detection_start_time = None  # Timer for detections
         self.going_backwards_time = None  # Timer for going backwards
         self.position_attempts = 0        # Num of attempts to position the arm
-        self.trex_pose_xyz = None         # Trex pose location
+        self.trex_position = None         # Trex pose location
         self.detections_dict = {}         # Dictionary to store detections
 
         # Arms variables
@@ -287,14 +287,11 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             acceleration_scaling =  0.8,
             wait=True)
 
-        # self.log.debug(await self.arms.get_predefined_poses_list(arm = self.arm_name))
-        # await self.arms.set_predefined_pose(arm = self.arm_name,
-        #                                     predefined_pose = 'pre_pick',
-        #                                     wait = True)
-
 
         self.trex_pose = await self.arms.get_current_pose(self.arm_name)
-        self.trex_pose_xyz = self.trex_pose['position']
+        self.trex_position = self.trex_pose['position']
+
+
 
     async def dynamic_trex_position(self):
         '''Position arm in trex position'''
@@ -307,7 +304,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             'yaw' : 0
         }
         
-        self.trex_pose_xyz = [self.trex_pose['x'],
+        self.trex_position = [self.trex_pose['x'],
                               self.trex_pose['y'],
                               self.trex_pose['z']]
 
@@ -362,7 +359,6 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                 self.button_x = self.detections_dict[self.button]['center_point'][0]
                 self.button_y = self.detections_dict[self.button]['center_point'][1]
                 self.button_z = self.detections_dict[self.button]['center_point'][2]
-
                 self.buttons_detected = True
                 
 
@@ -434,25 +430,35 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
     async def enter_POSITION_ARM(self):
         '''Action used to position the arm before pressing the button'''
-
-        # Try to position the arm dynamically (according to buttons location)
+        
         try:
             await self.static_trex_position()
-            await self.dynamic_trex_position()
+            await self.gripper_command('close')
 
-        # Try to position the arm statically (according to const joints values)
         except Exception as e:
-            self.log.debug("Couldn't perform dynamic trex positioning. \
-                           Performing static trex positioning...")
-            try:
-                await self.static_trex_position()
-
-            except Exception as e:
-                await self.return_arm_home()
+            await self.return_arm_home()
+            if self.position_attempts > MAX_POSITION_ATTEMPTS:
                 self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
                 self.abort(*ERROR_COULDNT_POSITION_ARM)
+
+        # Try to position the arm dynamically (according to buttons location)
+        # try:
+        #     await self.static_trex_position()
+        #     await self.dynamic_trex_position()
+
+        # # Try to position the arm statically (according to const joints values)
+        # except Exception as e:
+        #     self.log.debug("Couldn't perform dynamic trex positioning. \
+        #                    Performing static trex positioning...")
+        #     try:
+        #         await self.static_trex_position()
+
+        #     except Exception as e:
+        #         await self.return_arm_home()
+        #         self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
+        #         self.abort(*ERROR_COULDNT_POSITION_ARM)
         
-        await self.gripper_command('close')
+        # await self.gripper_command('close')
 
 
 
@@ -510,12 +516,22 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         elif (time.time() - self.detection_start_time) > NO_TARGET_TIMEOUT:
             self.abort(*ERROR_BUTTON_NOT_FOUND)
 
+        else:
+            try:
+                await self.motion.move_linear(distance = 0.05,
+                                                x_velocity = -0.05,
+                                                enable_obstacles = True,
+                                                wait = True)
+            
+            except Exception as e:
+                self.log.warn(f'ERROR IN transition_from_DETECTING_BUTTONS - {e}')
+
 
 
     async def transition_from_POSITION_ARM(self):
         current_pose = await self.arms.get_current_pose(self.arm_name)
-        current_pose_xyz = np.array(current_pose['position'])
-        if all(abs(current_pose_xyz - self.trex_pose_xyz) <= ARM_ERROR_THRESHOLD):
+        current_position = np.array(current_pose['position'])
+        if all(abs(current_position - self.trex_position) <= ARM_ERROR_THRESHOLD):
             self.set_state('PRESS_BUTTON')
 
         else:
