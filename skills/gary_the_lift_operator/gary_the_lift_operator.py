@@ -20,7 +20,7 @@ import asyncio
 import argparse
 import time
 import cv2
-import pytesseract
+#import pytesseract
 import numpy as np
 
 class SkillGaryTheLiftOperator(RayaFSMSkill):
@@ -52,8 +52,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
     STATES = [
         'APPROACHING_ELEVATOR',
+        'DETECTING_BUTTONS_1',
         'MOVING_SIDEWAYS',
-        'DETECTING_BUTTONS',
+        'DETECTING_BUTTONS_2',
         'POSITION_ARM',
         'PRESS_BUTTON',
         'RETURN_ARM',
@@ -66,7 +67,10 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         'END'
     ]
     
-    STATES_TIMEOUTS = {'DETECTING_BUTTONS' :
+    STATES_TIMEOUTS = {'DETECTING_BUTTONS_1' :
+                       (NO_TARGET_TIMEOUT, ERROR_BUTTON_NOT_FOUND),
+
+                       'DETECTING_BUTTONS_2' : 
                        (NO_TARGET_TIMEOUT, ERROR_BUTTON_NOT_FOUND),
 
                        'PRESSING_BUTTON' : 
@@ -75,7 +79,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     debug = False
     if debug is True:
         INITIAL_STATE = 'RETURN_ARM'
-        #INITIAL_STATE = 'DETECTING_BUTTONS'
+        #INITIAL_STATE = 'DETECTING_BUTTONS_2'
 
     ###--------------------------- SKILL METHODS ---------------------------###
 
@@ -126,6 +130,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         # General variables
         self.button = str(self.setup_args['button_to_press']) 
         self.approach_successful = False  # Approach success flag
+        self.approach_final_linear = 0    # Approach final linear step
+        self.approach_angle_error = 0     # Approach final angle error
+        self.sideways_distance = 0        # Sideways distance to move
         self.buttons_detected = False     # Buttons detected flag
         self.button_x = None              # x of the button (from baselink)
         self.button_y = None              # y of the button (from baselink)
@@ -269,11 +276,19 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
 
 
-    async def turn_and_burn(self):
+    async def turn_and_burn(self, distance):
         '''Turn 90 degrees, move forwards, turn back'''
-        await self.motion.rotate(angle = 90, angular_speed = 15, wait = True)
-        await self.motion.move_linear(distance = 0.28, x_velocity = 0.05, wait = True)
-        await self.motion.rotate(angle = -90, angular_speed = 15, wait = True)
+        await self.motion.rotate(angle = 90 + self.approach_angle_error,
+                                 angular_speed = 15,
+                                 wait = True)
+        
+        await self.motion.move_linear(distance = distance,
+                                      x_velocity = 0.05,
+                                      wait = True)
+
+        await self.motion.rotate(angle = -90,
+                                 angular_speed = 15,
+                                 wait = True)
 
 
 
@@ -300,7 +315,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     async def dynamic_trex_position(self):
         '''Position arm in trex position'''
         self.trex_pose = {
-            'x' : self.button_x + RIGHT_ARM_OFFSET['x'] + GRIPPER_JIG_OFFSET['x'] - 0.2,
+            'x' : self.button_x + RIGHT_ARM_OFFSET['x'] + GRIPPER_JIG_OFFSET['x'] - 0.1,
             'y' : self.button_y + RIGHT_ARM_OFFSET['y'] + GRIPPER_JIG_OFFSET['y'],
             'z' : self.button_z + RIGHT_ARM_OFFSET['z'] + GRIPPER_JIG_OFFSET['z'],
             'roll' : 0,
@@ -313,9 +328,39 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                               self.trex_pose['z']]
 
         await self.forward_kinematics(self.trex_pose,
-                                      cartesian_path = True,
+                                      #cartesian_path = True,
                                       planner = 'RRTconnect')
 
+
+
+    def pixels2meters(self):
+        '''Calculate the distance to move sideways from the console'''
+        if self.button in self.detections_dict:
+
+            # Convert camera pixels to meters in the current position
+            #!!left/right in this position is the X axis for the camera but
+            # the Y axis for the base link axes system, hence the names below!!
+            x_cam_detection_pix = self.detections_dict[self.button]['object_center_px'][1]
+            x_cam_center_dist_pix = abs(MAX_CAMERA_PIXELS_X/2 - x_cam_detection_pix)
+            x_cam_edge_dist_pix = abs(MAX_CAMERA_PIXELS_X - x_cam_detection_pix)
+            y_base_dist_meters = self.detections_dict[self.button]['center_point'][1]
+            pix_meters_ratio = abs(y_base_dist_meters / x_cam_center_dist_pix)
+
+            # Distance so that the button would be on the edge of the screen
+            diff_meters = float(x_cam_edge_dist_pix * pix_meters_ratio)
+
+            self.log.debug(f'y_base_dist_meters is: {y_base_dist_meters}')
+            self.log.debug(f'x_cam_center_dist_pix is: {x_cam_center_dist_pix}')
+            self.log.debug(f'x_cam_edge_dist_pix is: {x_cam_edge_dist_pix}')
+            self.log.debug(f'diff_meters is: {diff_meters}')
+            self.log.debug(f'turning degrees: {self.approach_angle_error}')
+
+            if diff_meters > 0.4  or diff_meters < 0.275:
+                self.log.debug(f'Using alternative value {0.34 + y_base_dist_meters}...')
+                return 0.34 + y_base_dist_meters
+            else:
+                return diff_meters
+    
 
 
     def led_confirmation(self):
@@ -362,7 +407,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         self.approach_done_feedback = done_feedback
         self.log.info(f'approach done feedback: {done_feedback}')
         self.log.info(f'approach done info: {done_info}')
-        
+        if 'final_error_angle' in done_info:
+            self.approach_angle_error = done_info['final_error_angle']
+
 
 
     def arms_callback_feedback(self, code, error_feedback, arm, percentage):
@@ -400,14 +447,14 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     ###------------------------------ ACTIONS ------------------------------###
 
     async def enter_APPROACHING_ELEVATOR(self):
+        '''Action used to execute the approach skill'''
 
         #TODO: REMOVE NAVIGATING AFTER TESTING
         await self.navigation.navigate_to_position(x = 124.0,
-                                                   y = 305.0,
+                                                   y = 311.0,
                                                    angle = -50.0,
                                                    wait = True)
 
-        '''Action used to execute the approach skill'''
         self.reset_approach_feedbacks()
         self.log.info('Executing ApproachToSomething skill...')
         await self.skill_approach.execute_setup(
@@ -442,15 +489,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             )
 
 
-
-    async def enter_MOVING_SIDEWAYS(self):
-        await self.sleep(1.5)
-        await self.turn_and_burn()
-
-
-
-    async def enter_DETECTING_BUTTONS(self):
-
+    async def enter_DETECTING_BUTTONS_1(self):
         # Enable model
         self.log.info('Enabling elevators_yolov5 model...')
         self.predictor_handler = await self.cv.enable_model(
@@ -470,18 +509,22 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         self.detection_start_time = time.time()
 
 
+    async def enter_MOVING_SIDEWAYS(self):
+        await self.sleep(1.5)
+        await self.turn_and_burn(self.sideways_distance)
+
+
+
+    async def enter_DETECTING_BUTTONS_2(self):
+        # Start timer (model is already enabled)
+        self.buttons_detected = False
+        await self.sleep(1.5)
+        self.detection_start_time = time.time()
+
+
     async def enter_POSITION_ARM(self):
         '''Action used to position the arm before pressing the button'''
-        # try:
-        #     await self.gripper_command('close')
-        #     await self.static_trex_position()
-
-        # except Exception as e:
-        #     await self.return_arm_home()
-        #     if self.position_attempts > MAX_POSITION_ATTEMPTS:
-        #         self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
-        #         self.abort(*ERROR_COULDNT_POSITION_ARM)
-
+        
         # Try to position the arm dynamically (according to buttons location)
         try:
             await self.gripper_command('close')
@@ -497,8 +540,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
             except Exception as e:
                 await self.return_arm_home()
-                self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
-                self.abort(*ERROR_COULDNT_POSITION_ARM)
+                if self.position_attempts > MAX_POSITION_ATTEMPTS:
+                    self.log.warn(f'ERROR IN enter_POSITION_ARM - {e}')
+                    self.abort(*ERROR_COULDNT_POSITION_ARM)
     
 
 
@@ -539,21 +583,35 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
     
     async def transition_from_APPROACHING_ELEVATOR(self):
         if self.approach_successful:
-            self.set_state('MOVING_SIDEWAYS')
+            self.set_state('DETECTING_BUTTONS_1')
         else:
             self.set_state('APPROACHING_ELEVATOR')
 
 
-    
-    async def transition_from_MOVING_SIDEWAYS(self):
-        if not self.motion.is_moving(): 
-            self.set_state('DETECTING_BUTTONS')
 
-
-
-    async def transition_from_DETECTING_BUTTONS(self):
+    async def transition_from_DETECTING_BUTTONS_1(self):
         await self.sleep(1.5)
         if self.buttons_detected:
+            self.buttons_detected = False
+            self.sideways_distance = self.pixels2meters()
+            self.detections_dict = {}
+            self.set_state('MOVING_SIDEWAYS')
+
+        elif (time.time() - self.detection_start_time) > NO_TARGET_TIMEOUT:
+            self.abort(*ERROR_BUTTON_NOT_FOUND)
+
+
+
+    async def transition_from_MOVING_SIDEWAYS(self):
+        if not self.motion.is_moving(): 
+            self.set_state('DETECTING_BUTTONS_2')
+
+
+
+    async def transition_from_DETECTING_BUTTONS_2(self):
+        await self.sleep(1.5)
+        if self.buttons_detected:
+            self.buttons_detected = False
             self.set_state('POSITION_ARM')
         
         elif (time.time() - self.detection_start_time) > NO_TARGET_TIMEOUT:
@@ -561,13 +619,13 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
         else:
             try:
-                await self.motion.move_linear(distance = 0.075,
+                await self.motion.move_linear(distance = 0.05,
                                                 x_velocity = -0.05,
                                                 enable_obstacles = True,
                                                 wait = False)
             
             except Exception as e:
-                self.log.warn(f'ERROR IN transition_from_DETECTING_BUTTONS - {e}')
+                self.log.warn(f'ERROR IN transition_from_DETECTING_BUTTONS_2 - {e}')
 
 
 

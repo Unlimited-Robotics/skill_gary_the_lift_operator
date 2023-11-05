@@ -5,6 +5,12 @@ NAV_BOTTOM_LOCATION = [
     0.854009997474796
 ]
 
+# The X resolution of the camera (nav bottom)
+MAX_CAMERA_PIXELS_X = 865
+
+# Distance from base link to the arms (meters)
+BASE_TO_ARM_DISTANCE = 0.23
+
 MAX_POSITION_ATTEMPTS = 5
 
 NO_TARGET_TIMEOUT = 10.0
