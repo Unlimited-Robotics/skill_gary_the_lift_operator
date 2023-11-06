@@ -278,7 +278,7 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
     async def turn_and_burn(self, distance):
         '''Turn 90 degrees, move forwards, turn back'''
-        await self.motion.rotate(angle = 90 + self.approach_angle_error,
+        await self.motion.rotate(angle = 90,
                                  angular_speed = 15,
                                  wait = True)
         
@@ -332,6 +332,10 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                                       planner = 'RRTconnect')
 
 
+    def alignment_correction(self):
+        pass
+
+
 
     def pixels2meters(self):
         '''Calculate the distance to move sideways from the console'''
@@ -356,8 +360,8 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             self.log.debug(f'turning degrees: {self.approach_angle_error}')
 
             if diff_meters > 0.4  or diff_meters < 0.275:
-                self.log.debug(f'Using alternative value {0.34 + y_base_dist_meters}...')
-                return 0.34 + y_base_dist_meters
+                self.log.debug(f'Using alternative value {0.32 + y_base_dist_meters}...')
+                return 0.32 + y_base_dist_meters
             else:
                 return diff_meters
     
@@ -450,8 +454,8 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         '''Action used to execute the approach skill'''
 
         #TODO: REMOVE NAVIGATING AFTER TESTING
-        await self.navigation.navigate_to_position(x = 124.0,
-                                                   y = 311.0,
+        await self.navigation.navigate_to_position(x = 126.0,
+                                                   y = 307.0,
                                                    angle = -50.0,
                                                    wait = True)
 
@@ -593,6 +597,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         await self.sleep(1.5)
         if self.buttons_detected:
             self.buttons_detected = False
+            await self.motion.rotate(angle = -self.approach_angle_error,
+                                     angular_speed = 10,
+                                     wait = True)
             self.sideways_distance = self.pixels2meters()
             self.detections_dict = {}
             self.set_state('MOVING_SIDEWAYS')
@@ -619,10 +626,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
 
         else:
             try:
-                await self.motion.move_linear(distance = 0.05,
-                                                x_velocity = -0.05,
-                                                enable_obstacles = True,
-                                                wait = False)
+                await self.motion.rotate(angle = -7.5,
+                                        angular_speed = 5,
+                                        wait = False)
             
             except Exception as e:
                 self.log.warn(f'ERROR IN transition_from_DETECTING_BUTTONS_2 - {e}')
