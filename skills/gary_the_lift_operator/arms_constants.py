@@ -29,7 +29,7 @@ TREX_POSITION_ANGLES =  [0.0, 0.0, 0.0, 0.0, 2.1, 0.0, -0.5, -1.57]
 # Gary 13 right arm
 RIGHT_ARM_OFFSET = {'x' : -0.04,
                     'y' : 0.0,
-                    'z' : 0.005}
+                    'z' : 0.0065}
 
 GRIPPER_JIG_OFFSET = {'x' : 0.0,
                       'y' : 0.0225,
