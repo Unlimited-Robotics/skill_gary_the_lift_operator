@@ -5,6 +5,9 @@ NAV_BOTTOM_LOCATION = [
     0.854009997474796
 ]
 
+# Path for the beep audio when pressing the button
+AUDIO_PATH = f'dat:audio/beep_sound.mp3'
+
 # The X resolution of the camera (nav bottom)
 MAX_CAMERA_PIXELS_X = 865
 

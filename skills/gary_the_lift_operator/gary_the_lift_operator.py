@@ -5,6 +5,7 @@ from raya.controllers.arms_controller import ArmsController
 from raya.controllers.navigation_controller import NavigationController
 from raya.controllers.lidar_controller import LidarController
 from raya.controllers.motion_controller import MotionController
+from raya.controllers.sound_controller import SoundController
 from raya.controllers.navigation_controller import POSITION_UNIT, ANGLE_UNIT
 from gary_arms_msgs.action import CalibrateGripper
 from raya.skills import RayaFSMSkill
@@ -101,6 +102,8 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
         self.log.info('Lidar controller - Enabled')
         self.arms = await self.get_controller('arms')
         self.log.info('Arms controller - Enabled')
+        self.sound = await self.get_controller('sound')
+        self.log.info('Sound controller - Enabled')
 
         # Set map
         self.log.info(f"Localizing in map: {self.setup_args['map_name']}...")
@@ -339,10 +342,6 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                                       planner = 'RRTconnect')
 
 
-    def alignment_correction(self):
-        pass
-
-
 
     def pixels2meters(self):
         '''Calculate the distance to move sideways from the console'''
@@ -396,6 +395,25 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                 return True
         
         return False
+    
+    
+
+    async def sound_control(self, switch):
+        '''Turn the beep beep beep sound on or off'''
+        if switch is True:
+            try:
+                await self.sound.play_sound(
+                                path = AUDIO_PATH,
+                                wait = False,
+                                callback_finish = self.sound_callback_finish)
+            except Exception as e:
+                self.log.warn(f'Couldnt play sound - {e}')
+
+        elif switch is False:
+            try:
+                await self.sound.cancel_sound()
+            except Exception as e:
+                self.log.warn(f'Couldnt cancel sound - {e}')
 
     ###----------------------------- CALLBACKS -----------------------------###
 
@@ -446,7 +464,11 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                 self.button_y = self.detections_dict[self.button]['center_point'][1]
                 self.button_z = self.detections_dict[self.button]['center_point'][2]
                 self.buttons_detected = True
-                
+    
+    
+
+    def sound_callback_finish(self, error, error_msg):
+        self.log.info(f'msg: {error} | info: {error_msg}')
 
 
     ###------------------------------ ACTIONS ------------------------------###
@@ -568,9 +590,8 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             await self.sleep(2.0)
 
         except Exception as e:
-            await self.return_arm_home()
-            self.log.warn(f'ERROR IN enter_PRESS_BUTTON - {e}')
-            self.abort(*ERROR_PRESSING_BUTTON)
+            self.log.warn(f'ERROR IN enter_PRESS_BUTTON - {e}. Trying again...')
+
         
         #TODO: check the led_confirmation feedback mechanism u created
         led_confirmation = True
@@ -614,7 +635,13 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             )
             self.set_state('MOVING_SIDEWAYS')
 
-        elif (time.time() - self.detection_start_time) > NO_TARGET_TIMEOUT:
+        else:
+            await self.motion.move_linear(distance = 0.07,
+                                            x_velocity = -0.05,
+                                            enable_obstacles = False,
+                                            wait = False)
+
+        if (time.time() - self.detection_start_time) > NO_TARGET_TIMEOUT:
             self.abort(*ERROR_BUTTON_NOT_FOUND)
 
 
@@ -656,7 +683,9 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
             self.position_attempts += 1
             if self.position_attempts == MAX_POSITION_ATTEMPTS:
                 self.abort(*ERROR_ARM_POSITION_NOT_ACCURATE)
-            self.set_state('POSITION_ARM')
+            else:
+                self.position_attempts = 0
+                self.set_state('POSITION_ARM')
 
 
 
@@ -676,7 +705,23 @@ class SkillGaryTheLiftOperator(RayaFSMSkill):
                     self.log.warn(f'ERROR IN transition_from_PRESS_BUTTON - {e}')
                     self.abort(*ERROR_GOING_BACKWARDS)
 
+        # The button is detected but unreachable, try to rotate a bit
+        else:
+            self.position_attempts += 1
+            if self.position_attempts > MAX_POSITION_ATTEMPTS:
+                await self.return_arm_home()
+                self.log.warn(f'ERROR IN PRESS_BUTTON - {e}')
+                self.abort(*ERROR_PRESSING_BUTTON)
+            else:
+                if self.button_x >= MAX_CAMERA_PIXELS_X/2:
+                    sign = '-'
+                if self.button_x < MAX_CAMERA_PIXELS_X/2:
+                    sign = '+'
+                await self.motion.rotate(angle = float(sign + '7.5'),
+                                        angular_speed = 5,
+                                        wait = False)
 
+                self.set_state('PRESS_BUTTON')
 
     async def transition_from_RETURN_ARM(self):
         self.set_state('END')
